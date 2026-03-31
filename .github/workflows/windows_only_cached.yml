@@ -1,0 +1,155 @@
+name: Create windows release (Cached)
+
+env:
+  CARGO_TERM_COLOR: always
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version"
+        required: false
+        default: ""
+
+jobs:
+  prepare_release:
+    runs-on: windows-2022
+    outputs:
+      release_ref: ${{ steps.output_ref.outputs.release_ref }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - name: Configure git
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v2
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      # Cache cargo registry and git deps
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Bump version
+        id: bump_version
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          $versionarg = "${{ github.event.inputs.version }}"
+          $versionarg = If ($versionarg.Length -gt 0) { "--version $versionarg" } else { "" }
+          $out = cargo xtask bump $versionarg.split()
+          echo $out
+          cargo update -p alvr_common
+          echo "::set-output name=version_tag::$(echo $out | sls -CaseSensitive -Pattern '^v.*$')"
+
+      - name: Push changes
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "[Auto] Bump version"
+
+      - name: Output ref for later checkouts
+        id: output_ref
+        run: echo "::set-output name=release_ref::$(git rev-parse HEAD)"
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.bump_version.outputs.version_tag }}
+          release_name: ALVR ${{ steps.bump_version.outputs.version_tag }}
+          draft: true
+          prerelease: false
+          commitish: ${{ steps.output_ref.outputs.release_ref }}
+
+  build_windows_streamer:
+    runs-on: windows-2022
+    needs: [prepare_release]
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          ref: ${{ needs.prepare_release.outputs.release_ref }}
+          submodules: true
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      # Cache cargo registry and git deps
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      # Cache compiled dependency artifacts (the big win)
+      - name: Cache build artifacts
+        uses: actions/cache@v3
+        with:
+          path: target/
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-build-
+
+      # Cache cargo-about binary so it doesn't reinstall every time
+      - name: Cache cargo-about
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: ${{ runner.os }}-cargo-about-0.8.4
+
+      - uses: crazy-max/ghaction-chocolatey@v1
+        with:
+          args: install zip unzip pkgconfiglite wixtoolset
+
+      - name: Install cargo-about
+        run: |
+          if (-not (Test-Path "$env:USERPROFILE\.cargo\bin\cargo-about.exe")) {
+            cargo install cargo-about --version 0.8.4
+          }
+
+      - name: Build and package ALVR
+        id: build
+        env:
+          RUST_BACKTRACE: 1
+        run: |
+          cargo xtask package-streamer --gpl --ci
+          cargo xtask package-launcher --ci
+
+      - name: Upload streamer
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.prepare_release.outputs.upload_url }}
+          asset_path: ./build/alvr_streamer_windows.zip
+          asset_name: alvr_streamer_windows.zip
+          asset_content_type: application/zip
+
+      - name: Upload launcher
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.prepare_release.outputs.upload_url }}
+          asset_path: ./build/alvr_launcher_windows.zip
+          asset_name: alvr_launcher_windows.zip
+          asset_content_type: application/zip
