@@ -1255,7 +1255,15 @@ Currently this cannot be reliably estimated automatically. The correct value sho
     #[schema(strings(help = "List of OpenXR-syle paths"))]
     pub button_mappings: Option<Vec<(String, Vec<ButtonBindingTarget>)>>,
 
+    #[schema(strings(display_name = "Auto button mapping"))]
+    #[schema(flag = "real-time")]
     pub button_mapping_config: AutomaticButtonMappingConfig,
+
+    #[schema(flag = "real-time")]
+    #[schema(strings(
+        help = "When controller tracking is lost, maintain the last known position instead of marking as untracked."
+    ))]
+    pub maintain_position_on_tracking_loss: bool,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy)]
@@ -2076,6 +2084,7 @@ pub fn session_settings_default() -> SettingsDefault {
                             min_duration_s: 0.01,
                         },
                     },
+                    maintain_position_on_tracking_loss: false,
                 },
             },
             position_recentering_mode: PositionRecenteringModeDefault {

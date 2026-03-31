@@ -62,6 +62,7 @@ pub struct OpenvrConfig {
     pub sw_thread_count: u32,
     pub controller_is_tracker: bool,
     pub controllers_enabled: bool,
+    pub maintain_position_on_tracking_loss: bool,
     pub body_tracking_vive_enabled: bool,
     pub body_tracking_has_legs: bool,
     pub enable_foveated_encoding: bool,

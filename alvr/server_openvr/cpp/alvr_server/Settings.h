@@ -89,6 +89,7 @@ public:
 
     bool m_enableControllers;
     int m_controllerIsTracker = false;
+    bool m_maintainPositionOnTrackingLoss = false;
     int m_enableBodyTrackingFakeVive = false;
     int m_bodyTrackingHasLegs = false;
     bool m_useSeparateHandTrackers = false;

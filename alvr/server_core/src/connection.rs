@@ -98,6 +98,12 @@ pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
         false
     };
 
+    let maintain_position_on_tracking_loss = if let Switch::Enabled(config) = &settings.headset.controllers {
+        config.maintain_position_on_tracking_loss
+    } else {
+        false
+    };
+
     let body_tracking_vive_enabled =
         if let Switch::Enabled(config) = &settings.headset.body_tracking {
             matches!(config.sink, BodyTrackingSinkConfig::FakeViveTracker)
@@ -190,6 +196,7 @@ pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
         sw_thread_count: settings.video.encoder_config.software.thread_count,
         controllers_enabled,
         controller_is_tracker,
+        maintain_position_on_tracking_loss,
         body_tracking_vive_enabled,
         body_tracking_has_legs,
         enable_foveated_encoding,

@@ -200,9 +200,10 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     auto vr_driver_input = vr::VRDriverInput();
 
     auto pose = vr::DriverPose_t {};
-    pose.poseIsValid = enabled;
-    pose.deviceIsConnected = enabled;
-    pose.result = enabled ? vr::TrackingResult_Running_OK : vr::TrackingResult_Uninitialized;
+    bool poseValid = enabled || (Settings::Instance().m_maintainPositionOnTrackingLoss && this->last_pose.poseIsValid);
+    pose.poseIsValid = poseValid;
+    pose.deviceIsConnected = poseValid;
+    pose.result = poseValid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Uninitialized;
 
     pose.qDriverFromHeadRotation = HmdQuaternion_Init(1, 0, 0, 0);
     pose.qWorldFromDriverRotation = HmdQuaternion_Init(1, 0, 0, 0);
@@ -258,6 +259,18 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         pose.vecAngularVelocity[0] = angularVelocity.v[0];
         pose.vecAngularVelocity[1] = angularVelocity.v[1];
         pose.vecAngularVelocity[2] = angularVelocity.v[2];
+    } else if (poseValid && this->last_pose.poseIsValid) {
+        // Maintain last known position when tracking is lost but setting is enabled
+        pose.qRotation = this->last_pose.qRotation;
+        pose.vecPosition[0] = this->last_pose.vecPosition[0];
+        pose.vecPosition[1] = this->last_pose.vecPosition[1];
+        pose.vecPosition[2] = this->last_pose.vecPosition[2];
+        pose.vecVelocity[0] = 0.0;
+        pose.vecVelocity[1] = 0.0;
+        pose.vecVelocity[2] = 0.0;
+        pose.vecAngularVelocity[0] = 0.0;
+        pose.vecAngularVelocity[1] = 0.0;
+        pose.vecAngularVelocity[2] = 0.0;
     }
 
     pose.poseTimeOffset = predictionS;
