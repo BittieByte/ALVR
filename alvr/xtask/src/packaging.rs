@@ -43,10 +43,9 @@ pub fn include_licenses(root_path: &Path, gpl: bool) {
         .run()
         .unwrap();
     let licenses_template = afs::crate_dir("xtask").join("licenses_template.hbs");
-    let licenses_content = cmd!(sh, "cargo about generate {licenses_template}")
-        .read()
-        .unwrap();
-    sh.write_file(licenses_dir.join("dependencies.html"), licenses_content)
+    let output_file = licenses_dir.join("dependencies.html");
+    cmd!(sh, "cargo about generate {licenses_template} --output-file {output_file}")
+        .run()
         .unwrap();
 }
 
