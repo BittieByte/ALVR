@@ -340,7 +340,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
 
     m_poseTargetTimestampNs = targetTimestampNs;
 
-    // Update skeleton - but only if we have valid tracking data or we can maintain previous state
+    // Update skeleton - but only if we have valid tracking data
     if (enabled && handSkeleton != nullptr) {
         vr::VRBoneTransform_t boneTransform[SKELETON_BONE_COUNT] = {};
 
@@ -412,7 +412,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         vr_driver_input->UpdateScalarComponent(
             m_buttonHandles[ALVR_INPUT_FINGER_PINKY], rotPinky, 0.0
         );
-    } else if (controllerMotion != nullptr) {
+    } else if (enabled && controllerMotion != nullptr) {
         if (m_lastThumbTouch != m_currentThumbTouch) {
             m_thumbTouchAnimationProgress += 1.f / ANIMATION_FRAME_COUNT;
             if (m_thumbTouchAnimationProgress > 1.f) {
