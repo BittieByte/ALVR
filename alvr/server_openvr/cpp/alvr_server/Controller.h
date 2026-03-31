@@ -36,6 +36,11 @@ private:
     float m_triggerValue = 0;
     float m_gripValue = 0;
 
+    // Store last valid bone transforms for maintaining fingers during tracking loss
+    vr::VRBoneTransform_t m_lastValidBoneTransforms[31] = {};
+    bool m_hasValidBoneTransforms = false;
+    bool m_lastInputWasHandSkeleton = false;
+
     vr::VRInputComponentHandle_t getHapticComponent();
     void GetBoneTransform(bool withController, vr::VRBoneTransform_t outBoneTransform[]);
 

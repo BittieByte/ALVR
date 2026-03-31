@@ -340,10 +340,8 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
 
     m_poseTargetTimestampNs = targetTimestampNs;
 
-    // Early return to skip updating the skeleton
-    if (!enabled) {
-        return false;
-    } else if (handSkeleton != nullptr) {
+    // Update skeleton - but only if we have valid tracking data or we can maintain previous state
+    if (enabled && handSkeleton != nullptr) {
         vr::VRBoneTransform_t boneTransform[SKELETON_BONE_COUNT] = {};
 
         boneTransform[0].orientation.w = 1.0;
@@ -379,6 +377,11 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             boneTransform,
             SKELETON_BONE_COUNT
         );
+
+        // Save this as our last valid bone transform state for maintaining during tracking loss
+        memcpy(m_lastValidBoneTransforms, boneTransform, sizeof(boneTransform));
+        m_hasValidBoneTransforms = true;
+        m_lastInputWasHandSkeleton = true;
 
         float rotThumb = (handSkeleton->jointRotations[2].z + handSkeleton->jointRotations[2].y
                           + handSkeleton->jointRotations[3].z + handSkeleton->jointRotations[3].y
@@ -493,6 +496,28 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             // Handle failure case
             Error("UpdateSkeletonComponentfailed.  Error: %i\n", err);
         }
+
+        // Save this as our last valid bone transform state for maintaining during tracking loss
+        memcpy(m_lastValidBoneTransforms, boneTransforms, sizeof(boneTransforms));
+        m_hasValidBoneTransforms = true;
+        m_lastInputWasHandSkeleton = false;
+    } else if (!enabled && poseValid && Settings::Instance().m_maintainPositionOnTrackingLoss 
+               && m_hasValidBoneTransforms) {
+        // Tracking is lost but maintain position is enabled and we have saved bone transforms.
+        // Update the skeleton with the last valid transforms to maintain finger positions.
+        
+        vr_driver_input->UpdateSkeletonComponent(
+            m_compSkeleton,
+            vr::VRSkeletalMotionRange_WithController,
+            m_lastValidBoneTransforms,
+            SKELETON_BONE_COUNT
+        );
+        vr_driver_input->UpdateSkeletonComponent(
+            m_compSkeleton,
+            vr::VRSkeletalMotionRange_WithoutController,
+            m_lastValidBoneTransforms,
+            SKELETON_BONE_COUNT
+        );
     }
 
     return false;
