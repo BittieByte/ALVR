@@ -221,6 +221,22 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     bool isCorrectMode = (isHandTrackerDevice && hasHandTrackerInput)
         || (isControllerDevice && hasControllerInput);
 
+    // Update usage tracking
+    if (hasHandTrackerInput && isHandTrackerDevice) {
+        m_wasLastUsedAsHandTracker = true;
+        m_wasLastUsedAsController = false;
+    } else if (hasControllerInput && isControllerDevice) {
+        m_wasLastUsedAsController = true;
+        m_wasLastUsedAsHandTracker = false;
+    }
+
+    // Determine if this device should maintain position
+    bool shouldMaintain = Settings::Instance().m_maintainPositionOnTrackingLoss
+        && this->last_pose.poseIsValid
+        && ((isHandTrackerDevice && m_wasLastUsedAsHandTracker)
+            || (isControllerDevice && m_wasLastUsedAsController))
+        && !oppositeModeSignal;
+
     if (oppositeModeSignal) {
         // Switch source: too dangerous to maintain the old pose/skeleton in opposite role.
         m_hasValidBoneTransforms = false;
@@ -239,14 +255,9 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     auto vr_driver_input = vr::VRDriverInput();
 
     auto pose = vr::DriverPose_t {};
-    bool canMaintain = Settings::Instance().m_maintainPositionOnTrackingLoss
-        && this->last_pose.poseIsValid
-        && isCorrectMode
-        && !oppositeModeSignal;
-
-    bool poseValid = enabled || canMaintain;
+    bool poseValid = enabled || shouldMaintain;
     pose.poseIsValid = poseValid;
-    pose.deviceIsConnected = enabled || (canMaintain && this->last_pose.deviceIsConnected);
+    pose.deviceIsConnected = enabled || (shouldMaintain && this->last_pose.deviceIsConnected);
     pose.result = poseValid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Uninitialized;
     
     // Track whether we have fresh valid tracking data this frame
@@ -534,7 +545,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         memcpy(m_lastValidBoneTransforms, boneTransforms, sizeof(boneTransforms));
         m_hasValidBoneTransforms = true;
         m_lastInputWasHandSkeleton = false;
-    } else if (!enabled && poseValid && canMaintain && m_hasValidBoneTransforms) {
+    } else if (!enabled && poseValid && shouldMaintain && m_hasValidBoneTransforms) {
         // Tracking is lost but maintain position is enabled and we have saved bone transforms.
         // Update the skeleton with the last valid transforms to maintain finger positions.
         

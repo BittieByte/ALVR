@@ -44,6 +44,10 @@ private:
     // Store last valid finger curl values for maintaining during tracking loss
     float m_lastValidFingerCurls[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // index, middle, ring, pinky
 
+    // Track which mode this device was last used for
+    bool m_wasLastUsedAsHandTracker = false;
+    bool m_wasLastUsedAsController = false;
+
     vr::VRInputComponentHandle_t getHapticComponent();
     void GetBoneTransform(bool withController, vr::VRBoneTransform_t outBoneTransform[]);
 
