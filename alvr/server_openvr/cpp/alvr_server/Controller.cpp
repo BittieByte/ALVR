@@ -342,6 +342,10 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
 
     // Update skeleton - but only if we have valid tracking data
     if (enabled && handSkeleton != nullptr) {
+        // Clear any previous controller bone transforms when switching to hand tracking
+        if (!m_lastInputWasHandSkeleton) {
+            m_hasValidBoneTransforms = false;
+        }
         vr::VRBoneTransform_t boneTransform[SKELETON_BONE_COUNT] = {};
 
         boneTransform[0].orientation.w = 1.0;
@@ -400,6 +404,12 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
                           + handSkeleton->jointRotations[24].z)
             * 0.67f;
 
+        // Save finger curl values for maintenance during tracking loss
+        m_lastValidFingerCurls[0] = rotIndex;  // index
+        m_lastValidFingerCurls[1] = rotMiddle; // middle  
+        m_lastValidFingerCurls[2] = rotRing;   // ring
+        m_lastValidFingerCurls[3] = rotPinky;  // pinky
+
         vr_driver_input->UpdateScalarComponent(
             m_buttonHandles[ALVR_INPUT_FINGER_INDEX], rotIndex, 0.0
         );
@@ -413,6 +423,10 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             m_buttonHandles[ALVR_INPUT_FINGER_PINKY], rotPinky, 0.0
         );
     } else if (enabled && controllerMotion != nullptr) {
+        // Clear any previous hand skeleton bone transforms when switching to controller tracking
+        if (m_lastInputWasHandSkeleton) {
+            m_hasValidBoneTransforms = false;
+        }
         if (m_lastThumbTouch != m_currentThumbTouch) {
             m_thumbTouchAnimationProgress += 1.f / ANIMATION_FRAME_COUNT;
             if (m_thumbTouchAnimationProgress > 1.f) {
@@ -450,19 +464,19 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         );
 
         // Ring and pinky fingers are not tracked. Infer a more natural pose.
-        if (m_currentThumbTouch) {
-            vr_driver_input->UpdateScalarComponent(m_buttonHandles[ALVR_INPUT_FINGER_RING], 1, 0.0);
-            vr_driver_input->UpdateScalarComponent(
-                m_buttonHandles[ALVR_INPUT_FINGER_PINKY], 1, 0.0
-            );
-        } else {
-            vr_driver_input->UpdateScalarComponent(
-                m_buttonHandles[ALVR_INPUT_FINGER_RING], m_gripValue, 0.0
-            );
-            vr_driver_input->UpdateScalarComponent(
-                m_buttonHandles[ALVR_INPUT_FINGER_PINKY], m_gripValue, 0.0
-            );
-        }
+        float ringCurl = m_currentThumbTouch ? 1.0f : m_gripValue;
+        float pinkyCurl = m_currentThumbTouch ? 1.0f : m_gripValue;
+
+        vr_driver_input->UpdateScalarComponent(m_buttonHandles[ALVR_INPUT_FINGER_RING], ringCurl, 0.0);
+        vr_driver_input->UpdateScalarComponent(
+            m_buttonHandles[ALVR_INPUT_FINGER_PINKY], pinkyCurl, 0.0
+        );
+
+        // Save finger curl values for maintenance during tracking loss
+        m_lastValidFingerCurls[0] = indexCurl;  // index
+        m_lastValidFingerCurls[1] = m_gripValue; // middle
+        m_lastValidFingerCurls[2] = ringCurl;   // ring
+        m_lastValidFingerCurls[3] = pinkyCurl;  // pinky
 
         vr::VRBoneTransform_t boneTransforms[SKELETON_BONE_COUNT];
 
@@ -517,6 +531,20 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             vr::VRSkeletalMotionRange_WithoutController,
             m_lastValidBoneTransforms,
             SKELETON_BONE_COUNT
+        );
+
+        // Also maintain the last valid finger curl values
+        vr_driver_input->UpdateScalarComponent(
+            m_buttonHandles[ALVR_INPUT_FINGER_INDEX], m_lastValidFingerCurls[0], 0.0
+        );
+        vr_driver_input->UpdateScalarComponent(
+            m_buttonHandles[ALVR_INPUT_FINGER_MIDDLE], m_lastValidFingerCurls[1], 0.0
+        );
+        vr_driver_input->UpdateScalarComponent(
+            m_buttonHandles[ALVR_INPUT_FINGER_RING], m_lastValidFingerCurls[2], 0.0
+        );
+        vr_driver_input->UpdateScalarComponent(
+            m_buttonHandles[ALVR_INPUT_FINGER_PINKY], m_lastValidFingerCurls[3], 0.0
         );
     }
 

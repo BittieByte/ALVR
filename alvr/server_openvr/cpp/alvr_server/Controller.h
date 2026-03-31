@@ -41,6 +41,9 @@ private:
     bool m_hasValidBoneTransforms = false;
     bool m_lastInputWasHandSkeleton = false;
 
+    // Store last valid finger curl values for maintaining during tracking loss
+    float m_lastValidFingerCurls[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // index, middle, ring, pinky
+
     vr::VRInputComponentHandle_t getHapticComponent();
     void GetBoneTransform(bool withController, vr::VRBoneTransform_t outBoneTransform[]);
 
