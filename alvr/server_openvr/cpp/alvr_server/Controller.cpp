@@ -212,6 +212,20 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     bool enabled = (controllerMotion != nullptr || handSkeleton != nullptr)
         && (enabledAsHandTracker || enabledAsController);
 
+    bool isHandTrackerDevice = (device_id == HAND_TRACKER_LEFT_ID || device_id == HAND_TRACKER_RIGHT_ID);
+    bool isControllerDevice = (device_id == HAND_LEFT_ID || device_id == HAND_RIGHT_ID);
+    bool hasHandTrackerInput = handData.isHandTracker && handSkeleton != nullptr;
+    bool hasControllerInput = !handData.isHandTracker && controllerMotion != nullptr;
+    bool oppositeModeSignal = (isHandTrackerDevice && controllerMotion != nullptr)
+        || (isControllerDevice && handData.isHandTracker && handSkeleton != nullptr);
+    bool isCorrectMode = (isHandTrackerDevice && hasHandTrackerInput)
+        || (isControllerDevice && hasControllerInput);
+
+    if (oppositeModeSignal) {
+        // Switch source: too dangerous to maintain the old pose/skeleton in opposite role.
+        m_hasValidBoneTransforms = false;
+    }
+
     Debug(
         "%s %s: enabled: %d, ctrl: %d, hand: %d",
         (device_id == HAND_TRACKER_LEFT_ID || device_id == HAND_TRACKER_RIGHT_ID) ? "hand tracker"
@@ -225,9 +239,14 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     auto vr_driver_input = vr::VRDriverInput();
 
     auto pose = vr::DriverPose_t {};
-    bool poseValid = enabled || (Settings::Instance().m_maintainPositionOnTrackingLoss && this->last_pose.poseIsValid);
+    bool canMaintain = Settings::Instance().m_maintainPositionOnTrackingLoss
+        && this->last_pose.poseIsValid
+        && isCorrectMode
+        && !oppositeModeSignal;
+
+    bool poseValid = enabled || canMaintain;
     pose.poseIsValid = poseValid;
-    pose.deviceIsConnected = poseValid;
+    pose.deviceIsConnected = enabled || (canMaintain && this->last_pose.deviceIsConnected);
     pose.result = poseValid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Uninitialized;
     
     // Track whether we have fresh valid tracking data this frame
@@ -341,7 +360,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     m_poseTargetTimestampNs = targetTimestampNs;
 
     // Update skeleton - but only if we have valid tracking data
-    if (enabled && handSkeleton != nullptr) {
+    if (enabled && handSkeleton != nullptr && isCorrectMode) {
         // Clear any previous controller bone transforms when switching to hand tracking
         if (!m_lastInputWasHandSkeleton) {
             m_hasValidBoneTransforms = false;
@@ -422,7 +441,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         vr_driver_input->UpdateScalarComponent(
             m_buttonHandles[ALVR_INPUT_FINGER_PINKY], rotPinky, 0.0
         );
-    } else if (enabled && controllerMotion != nullptr) {
+    } else if (enabled && controllerMotion != nullptr && isCorrectMode) {
         // Clear any previous hand skeleton bone transforms when switching to controller tracking
         if (m_lastInputWasHandSkeleton) {
             m_hasValidBoneTransforms = false;
@@ -515,8 +534,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         memcpy(m_lastValidBoneTransforms, boneTransforms, sizeof(boneTransforms));
         m_hasValidBoneTransforms = true;
         m_lastInputWasHandSkeleton = false;
-    } else if (!enabled && poseValid && Settings::Instance().m_maintainPositionOnTrackingLoss 
-               && m_hasValidBoneTransforms) {
+    } else if (!enabled && poseValid && canMaintain && m_hasValidBoneTransforms) {
         // Tracking is lost but maintain position is enabled and we have saved bone transforms.
         // Update the skeleton with the last valid transforms to maintain finger positions.
         
