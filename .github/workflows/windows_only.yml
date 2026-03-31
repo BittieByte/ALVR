@@ -1,4 +1,4 @@
-name: Create release
+name: Create windows release
 
 env:
   CARGO_TERM_COLOR: always
@@ -79,6 +79,9 @@ jobs:
         with:
           args: install zip unzip pkgconfiglite wixtoolset
 
+      - name: Install cargo-about
+        run: cargo install cargo-about --version 0.8.4
+
       - name: Build and package ALVR
         id: build
         env:
@@ -96,6 +99,7 @@ jobs:
           asset_path: ./build/alvr_streamer_windows.zip
           asset_name: alvr_streamer_windows.zip
           asset_content_type: application/zip
+
       - name: Upload launcher
         uses: actions/upload-release-asset@v1
         env:
