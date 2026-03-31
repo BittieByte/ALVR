@@ -216,10 +216,6 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     bool isControllerDevice = (device_id == HAND_LEFT_ID || device_id == HAND_RIGHT_ID);
     bool hasHandTrackerInput = handData.isHandTracker && handSkeleton != nullptr;
     bool hasControllerInput = !handData.isHandTracker && controllerMotion != nullptr;
-    bool oppositeModeSignal = (isHandTrackerDevice && controllerMotion != nullptr)
-        || (isControllerDevice && handData.isHandTracker && handSkeleton != nullptr);
-    bool isCorrectMode = (isHandTrackerDevice && hasHandTrackerInput)
-        || (isControllerDevice && hasControllerInput);
 
     // Update usage tracking
     if (hasHandTrackerInput && isHandTrackerDevice) {
@@ -230,17 +226,26 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         m_wasLastUsedAsHandTracker = false;
     }
 
+    // Detect mode switching - if this device is getting input for the opposite mode, reset state
+    bool modeSwitchDetected = (isHandTrackerDevice && hasControllerInput) ||
+                              (isControllerDevice && hasHandTrackerInput);
+
+    if (modeSwitchDetected) {
+        m_hasValidBoneTransforms = false;
+        m_wasLastUsedAsHandTracker = false;
+        m_wasLastUsedAsController = false;
+    }
+
     // Determine if this device should maintain position
+    // Maintain if: setting enabled, has valid last pose, was last used for correct role, currently has no input, and not switching modes
     bool shouldMaintain = Settings::Instance().m_maintainPositionOnTrackingLoss
         && this->last_pose.poseIsValid
         && ((isHandTrackerDevice && m_wasLastUsedAsHandTracker)
             || (isControllerDevice && m_wasLastUsedAsController))
-        && !oppositeModeSignal;
+        && !enabled
+        && !modeSwitchDetected;
 
-    if (oppositeModeSignal) {
-        // Switch source: too dangerous to maintain the old pose/skeleton in opposite role.
-        m_hasValidBoneTransforms = false;
-    }
+
 
     Debug(
         "%s %s: enabled: %d, ctrl: %d, hand: %d",
