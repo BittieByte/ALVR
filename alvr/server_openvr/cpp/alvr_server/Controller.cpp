@@ -5,8 +5,33 @@
 #include "Utils.h"
 #include "include/openvr_math.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string_view>
+
+// Helper function to check if a position looks like an invalid/sleep position
+static bool IsValidControllerPosition(const float position[3]) {
+    // Check for position at origin (0, 0, 0) which indicates an uninitialized/sleep state
+    const float ORIGIN_THRESHOLD = 0.001f;  // ~1mm tolerance
+    bool atOrigin = std::abs(position[0]) < ORIGIN_THRESHOLD &&
+                    std::abs(position[1]) < ORIGIN_THRESHOLD &&
+                    std::abs(position[2]) < ORIGIN_THRESHOLD;
+    
+    if (atOrigin) {
+        return false;  // Position at origin is invalid
+    }
+    
+    // Check for positions that are extremely far away (likely junk data)
+    // Most XR tracking is within ~10 meters range
+    const float MAX_DISTANCE_SQ = 100.0f * 100.0f;  // 100 meters squared
+    float distSq = position[0] * position[0] + position[1] * position[1] + position[2] * position[2];
+    
+    if (distSq > MAX_DISTANCE_SQ) {
+        return false;  // Position is too far away
+    }
+    
+    return true;
+}
 
 Controller::Controller(uint64_t deviceID, vr::EVRSkeletalTrackingLevel skeletonLevel)
     : TrackedDevice(
@@ -204,6 +229,9 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     pose.poseIsValid = poseValid;
     pose.deviceIsConnected = poseValid;
     pose.result = poseValid ? vr::TrackingResult_Running_OK : vr::TrackingResult_Uninitialized;
+    
+    // Track whether we have fresh valid tracking data this frame
+    bool hasValidTrackingData = enabled;
 
     pose.qDriverFromHeadRotation = HmdQuaternion_Init(1, 0, 0, 0);
     pose.qWorldFromDriverRotation = HmdQuaternion_Init(1, 0, 0, 0);
@@ -211,54 +239,73 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     if (controllerMotion != nullptr) {
         auto m = controllerMotion;
 
-        pose.qRotation = HmdQuaternion_Init(
-            m->orientation.w, m->orientation.x, m->orientation.y, m->orientation.z
-        );
+        // Validate the position before using it - reject sleep/invalid positions
+        if (!IsValidControllerPosition(m->position)) {
+            Debug(
+                "Rejecting invalid controller position [%.2f, %.2f, %.2f] for device %llu",
+                m->position[0], m->position[1], m->position[2], device_id
+            );
+            // Treat as if there's no valid tracking data this frame
+            hasValidTrackingData = false;
+        } else {
+            pose.qRotation = HmdQuaternion_Init(
+                m->orientation.w, m->orientation.x, m->orientation.y, m->orientation.z
+            );
 
-        pose.vecPosition[0] = m->position[0];
-        pose.vecPosition[1] = m->position[1];
-        pose.vecPosition[2] = m->position[2];
+            pose.vecPosition[0] = m->position[0];
+            pose.vecPosition[1] = m->position[1];
+            pose.vecPosition[2] = m->position[2];
 
-        pose.vecVelocity[0] = m->linearVelocity[0];
-        pose.vecVelocity[1] = m->linearVelocity[1];
-        pose.vecVelocity[2] = m->linearVelocity[2];
+            pose.vecVelocity[0] = m->linearVelocity[0];
+            pose.vecVelocity[1] = m->linearVelocity[1];
+            pose.vecVelocity[2] = m->linearVelocity[2];
 
-        pose.vecAngularVelocity[0] = m->angularVelocity[0];
-        pose.vecAngularVelocity[1] = m->angularVelocity[1];
-        pose.vecAngularVelocity[2] = m->angularVelocity[2];
+            pose.vecAngularVelocity[0] = m->angularVelocity[0];
+            pose.vecAngularVelocity[1] = m->angularVelocity[1];
+            pose.vecAngularVelocity[2] = m->angularVelocity[2];
+        }
     } else if (handSkeleton != nullptr) {
         auto r = handSkeleton->jointRotations[0];
-        pose.qRotation = HmdQuaternion_Init(r.w, r.x, r.y, r.z);
-
         auto p = handSkeleton->jointPositions[0];
-        pose.vecPosition[0] = p[0];
-        pose.vecPosition[1] = p[1];
-        pose.vecPosition[2] = p[2];
+        
+        // Validate the position before using it - reject sleep/invalid positions
+        if (!IsValidControllerPosition((const float*)p)) {
+            Debug(
+                "Rejecting invalid hand skeleton position [%.2f, %.2f, %.2f] for device %llu",
+                p[0], p[1], p[2], device_id
+            );
+            // Treat as if there's no valid tracking data this frame
+            hasValidTrackingData = false;
+        } else {
+            pose.qRotation = HmdQuaternion_Init(r.w, r.x, r.y, r.z);
+            pose.vecPosition[0] = p[0];
+            pose.vecPosition[1] = p[1];
+            pose.vecPosition[2] = p[2];
 
-        // If possible, use the last stored m_pose and timestamp
-        // to calculate the velocities of the current pose.
-        double linearVelocity[3] = { 0.0, 0.0, 0.0 };
-        vr::HmdVector3d_t angularVelocity = { 0.0, 0.0, 0.0 };
+            // If possible, use the last stored m_pose and timestamp
+            // to calculate the velocities of the current pose.
+            double linearVelocity[3] = { 0.0, 0.0, 0.0 };
+            vr::HmdVector3d_t angularVelocity = { 0.0, 0.0, 0.0 };
 
-        if (handData.predictHandSkeleton && this->last_pose.poseIsValid) {
-            double dt = ((double)targetTimestampNs - (double)m_poseTargetTimestampNs) / NS_PER_S;
+            if (handData.predictHandSkeleton && this->last_pose.poseIsValid) {
+                double dt = ((double)targetTimestampNs - (double)m_poseTargetTimestampNs) / NS_PER_S;
 
-            if (dt > 0.0) {
-                linearVelocity[0] = (pose.vecPosition[0] - this->last_pose.vecPosition[0]) / dt;
-                linearVelocity[1] = (pose.vecPosition[1] - this->last_pose.vecPosition[1]) / dt;
-                linearVelocity[2] = (pose.vecPosition[2] - this->last_pose.vecPosition[2]) / dt;
-                angularVelocity
-                    = AngularVelocityBetweenQuats(this->last_pose.qRotation, pose.qRotation, dt);
+                if (dt > 0.0) {
+                    linearVelocity[0] = (pose.vecPosition[0] - this->last_pose.vecPosition[0]) / dt;
+                    linearVelocity[1] = (pose.vecPosition[1] - this->last_pose.vecPosition[1]) / dt;
+                    linearVelocity[2] = (pose.vecPosition[2] - this->last_pose.vecPosition[2]) / dt;
+                    angularVelocity
+                        = AngularVelocityBetweenQuats(this->last_pose.qRotation, pose.qRotation, dt);
+                }
             }
+
+            pose.vecVelocity[0] = linearVelocity[0];
+            pose.vecVelocity[1] = linearVelocity[1];
+            pose.vecVelocity[2] = linearVelocity[2];
+            pose.vecAngularVelocity[0] = angularVelocity.v[0];
+            pose.vecAngularVelocity[1] = angularVelocity.v[1];
+            pose.vecAngularVelocity[2] = angularVelocity.v[2];
         }
-
-        pose.vecVelocity[0] = linearVelocity[0];
-        pose.vecVelocity[1] = linearVelocity[1];
-        pose.vecVelocity[2] = linearVelocity[2];
-
-        pose.vecAngularVelocity[0] = angularVelocity.v[0];
-        pose.vecAngularVelocity[1] = angularVelocity.v[1];
-        pose.vecAngularVelocity[2] = angularVelocity.v[2];
     } else if (poseValid && this->last_pose.poseIsValid) {
         // Maintain last known position when tracking is lost but setting is enabled
         pose.qRotation = this->last_pose.qRotation;
@@ -275,7 +322,21 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
 
     pose.poseTimeOffset = predictionS;
 
-    this->submit_pose(pose);
+    // Only save the pose as our last valid pose if it contains actual tracking data.
+    // This prevents invalid/sleep positions from being stored and then used when
+    // maintain_position_on_tracking_loss is enabled.
+    if (hasValidTrackingData) {
+        this->submit_pose(pose);
+    } else if (poseValid) {
+        // Device is valid (from maintain_position) but no fresh tracking data.
+        // Submit the maintained pose but don't update last_pose with this frame's data.
+        vr::VRServerDriverHost()->TrackedDevicePoseUpdated(
+            this->object_id, pose, sizeof(vr::DriverPose_t)
+        );
+    } else {
+        // No valid tracking and maintain_position is disabled - just submit the invalid pose
+        this->submit_pose(pose);
+    }
 
     m_poseTargetTimestampNs = targetTimestampNs;
 
