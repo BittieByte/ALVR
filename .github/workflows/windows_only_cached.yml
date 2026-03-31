@@ -28,9 +28,17 @@ jobs:
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      # Cache cargo registry and git deps
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
         with:
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
       - name: Bump version
         id: bump_version
@@ -79,26 +87,43 @@ jobs:
           toolchain: stable
           override: true
 
-      - uses: Swatinem/rust-cache@v2
+      # Cache cargo registry and git deps
+      - name: Cache Cargo registry
+        uses: actions/cache@v3
         with:
-          cache-on-failure: true
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      # Cache compiled dependency artifacts (the big win)
+      - name: Cache build artifacts
+        uses: actions/cache@v3
+        with:
+          path: target/
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}-
+            ${{ runner.os }}-cargo-build-
+
+      # Cache cargo-about binary so it doesn't reinstall every time
+      - name: Cache cargo-about
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: ${{ runner.os }}-cargo-about-0.8.4
 
       - uses: crazy-max/ghaction-chocolatey@v1
         with:
           args: install zip unzip pkgconfiglite wixtoolset
 
-      - name: Cache cargo-about binary
-        uses: actions/cache@v3
-        with:
-          path: C:\Users\runneradmin\.cargo\bin\cargo-about.exe
-          key: ${{ runner.os }}-cargo-about-0.8.4
-
       - name: Install cargo-about
         run: |
-          if (-not (Test-Path "C:\Users\runneradmin\.cargo\bin\cargo-about.exe")) {
+          if (-not (Test-Path "$env:USERPROFILE\.cargo\bin\cargo-about.exe")) {
             cargo install cargo-about --version 0.8.4
-          } else {
-            echo "cargo-about already cached, skipping install"
           }
 
       - name: Build and package ALVR
