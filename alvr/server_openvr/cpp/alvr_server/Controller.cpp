@@ -376,7 +376,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     m_poseTargetTimestampNs = targetTimestampNs;
 
     // Update skeleton - but only if we have valid tracking data
-    if (enabled && handSkeleton != nullptr && isCorrectMode) {
+    if (enabled && handSkeleton != nullptr) {
         // Clear any previous controller bone transforms when switching to hand tracking
         if (!m_lastInputWasHandSkeleton) {
             m_hasValidBoneTransforms = false;
@@ -457,7 +457,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         vr_driver_input->UpdateScalarComponent(
             m_buttonHandles[ALVR_INPUT_FINGER_PINKY], rotPinky, 0.0
         );
-    } else if (enabled && controllerMotion != nullptr && isCorrectMode) {
+    } else if (enabled && controllerMotion != nullptr) {
         // Clear any previous hand skeleton bone transforms when switching to controller tracking
         if (m_lastInputWasHandSkeleton) {
             m_hasValidBoneTransforms = false;
