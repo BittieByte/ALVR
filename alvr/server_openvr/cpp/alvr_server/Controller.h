@@ -36,6 +36,9 @@ private:
     float m_triggerValue = 0;
     float m_gripValue = 0;
 
+    vr::VRBoneTransform_t m_lastBoneTransform[SKELETON_BONE_COUNT];
+    bool                  m_hasLastBoneTransform = false;
+
     vr::VRInputComponentHandle_t getHapticComponent();
     void GetBoneTransform(bool withController, vr::VRBoneTransform_t outBoneTransform[]);
 
