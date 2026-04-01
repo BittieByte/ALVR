@@ -229,10 +229,17 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             validTracking = IsValidControllerPosition(handSkeleton->jointPositions[0]);
         }
 
-        if (!validTracking) {
-            if (Settings::Instance().m_maintainPositionOnTrackingLoss) {
+        // Detect device type switch
+        bool noInputForThisDevice = (controllerMotion == nullptr && !handData.isHandTracker)
+            || (handSkeleton == nullptr && handData.isHandTracker);
+
+        if (!validTracking || noInputForThisDevice) {
+            if (Settings::Instance().m_maintainPositionOnTrackingLoss && !noInputForThisDevice) {
+                // Only freeze on actual tracking loss
                 return false;
             }
+
+            // Force device into disabled state so SteamVR updates it
             enabled = false;
         }
     }
