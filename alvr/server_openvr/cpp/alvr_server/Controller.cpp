@@ -219,7 +219,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
     bool enabled = (controllerMotion != nullptr || handSkeleton != nullptr)
         && (enabledAsHandTracker || enabledAsController);
 
-    // ── NEW: Validate tracking source (controller OR hand root) ───────────
+    // ── Validate tracking and handle device switching ───────────────
     if (enabled) {
         bool validTracking = true;
 
@@ -230,16 +230,27 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         }
 
         // Detect device type switch
-        bool noInputForThisDevice = (controllerMotion == nullptr && !handData.isHandTracker)
-            || (handSkeleton == nullptr && handData.isHandTracker);
+        bool switchedToOtherType = (controllerMotion != nullptr && handData.isHandTracker)
+            || // controller device now sees hand tracker
+            (handSkeleton != nullptr && !handData.isHandTracker); // hand device now sees controller
 
-        if (!validTracking || noInputForThisDevice) {
-            if (Settings::Instance().m_maintainPositionOnTrackingLoss && !noInputForThisDevice) {
-                // Only freeze on actual tracking loss
+        if (switchedToOtherType) {
+            // Immediately submit “offline” pose for this device
+            auto offlinePose = vr::DriverPose_t { };
+            offlinePose.poseIsValid = false;
+            offlinePose.deviceIsConnected = false;
+            offlinePose.result = vr::TrackingResult_Uninitialized;
+            vr::VRDriverInput()->UpdateSkeletonComponent(
+                m_compSkeleton, vr::VRSkeletalMotionRange_WithController, nullptr, 0
+            ); // optional: clear skeleton
+            this->submit_pose(offlinePose);
+
+            // Disable this device for this frame
+            enabled = false;
+        } else if (!validTracking) {
+            if (Settings::Instance().m_maintainPositionOnTrackingLoss) {
                 return false;
             }
-
-            // Force device into disabled state so SteamVR updates it
             enabled = false;
         }
     }
