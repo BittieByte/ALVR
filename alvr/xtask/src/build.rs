@@ -1,4 +1,3 @@
-use crate::command;
 use alvr_filesystem::{self as afs, Layout};
 use std::{
     env,
@@ -7,7 +6,7 @@ use std::{
     path::PathBuf,
     vec,
 };
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 #[derive(Clone, Copy)]
 pub enum Profile {
@@ -187,14 +186,6 @@ pub fn build_streamer(
         )
         .unwrap();
 
-        // Bring along the c++ runtime
-        command::copy_recursive(
-            &sh,
-            &afs::crate_dir("server_openvr").join("cpp/bin/windows"),
-            &build_layout.openvr_driver_lib_dir(),
-        )
-        .unwrap();
-
         // copy ffmpeg binaries
         if gpl {
             let bin_dir = &build_layout.openvr_driver_lib_dir();
@@ -208,6 +199,13 @@ pub fn build_streamer(
                 sh.copy_file(lib_path.clone(), bin_dir).unwrap();
             }
         }
+
+        // copy libvpl.dll
+        sh.copy_file(
+            afs::deps_dir().join("windows/libvpl/alvr_build/bin/libvpl.dll"),
+            build_layout.openvr_driver_lib_dir(),
+        )
+        .unwrap();
     } else if cfg!(target_os = "linux") {
         // build compositor wrapper
         let _push_guard = sh.push_dir(afs::crate_dir("vrcompositor_wrapper"));
@@ -308,7 +306,7 @@ pub fn build_launcher(profile: Profile, reproducible: bool) {
 fn build_android_lib_impl(dir_name: &str, profile: Profile, link_stdcpp: bool, all_targets: bool) {
     let sh = Shell::new().unwrap();
 
-    let mut ndk_flags = vec!["--no-strip", "-p", "26", "-t", "arm64-v8a"];
+    let mut ndk_flags = vec!["--no-strip", "-p", "28", "-t", "arm64-v8a"];
 
     if all_targets {
         ndk_flags.extend(["-t", "armeabi-v7a", "-t", "x86_64", "-t", "x86"]);
@@ -425,4 +423,114 @@ pub fn build_android_client(profile: Profile) {
         build_dir.join(format!("{ARTIFACT_NAME}.apk")),
     )
     .unwrap();
+}
+
+pub fn build_streamer_incremental(
+    profile: Profile,
+    gpl: bool,
+    root: Option<String>,
+    reproducible: bool,
+    profiling: bool,
+) {
+    let sh = Shell::new().unwrap();
+
+    let build_layout = Layout::new(&afs::streamer_build_dir());
+
+    let mut common_flags = vec![];
+    match profile {
+        Profile::Distribution => {
+            common_flags.push("--profile");
+            common_flags.push("distribution");
+        }
+        Profile::Release => common_flags.push("--release"),
+        Profile::Debug => (),
+    }
+
+    if reproducible {
+        common_flags.push("--locked");
+    }
+
+    let artifacts_dir = if cfg!(all(windows, target_arch = "aarch64")) {
+        const TARGET: &str = "x86_64-pc-windows-msvc";
+
+        common_flags.push("--target");
+        common_flags.push(TARGET);
+
+        afs::target_dir().join(TARGET).join(profile.to_string())
+    } else {
+        afs::target_dir().join(profile.to_string())
+    };
+
+    let common_flags_ref = &common_flags;
+
+    // ✅ DO NOT DELETE BUILD DIR
+    sh.create_dir(build_layout.openvr_driver_lib_dir()).ok();
+    sh.create_dir(&build_layout.executables_dir).ok();
+
+    if let Some(root) = root {
+        sh.set_var("ALVR_ROOT_DIR", root);
+    }
+
+    // ===== Build server =====
+    {
+        let gpl_flag = if gpl {
+            vec!["--features", "gpl"]
+        } else {
+            vec![]
+        };
+
+        let profiling_flag = if profiling {
+            vec!["--features", "alvr_server_core/trace-performance"]
+        } else {
+            vec![]
+        };
+
+        let _push_guard = sh.push_dir(afs::crate_dir("server_openvr"));
+        cmd!(
+            sh,
+            "cargo build {common_flags_ref...} {gpl_flag...} {profiling_flag...}"
+        )
+        .run()
+        .unwrap();
+
+        // overwrite only the binary (cheap)
+        sh.copy_file(
+            artifacts_dir.join(afs::dynlib_fname("alvr_server_openvr")),
+            build_layout.openvr_driver_lib(),
+        )
+        .ok();
+
+        if cfg!(windows) {
+            sh.copy_file(
+                artifacts_dir.join("alvr_server_openvr.pdb"),
+                build_layout
+                    .openvr_driver_lib_dir()
+                    .join("alvr_server_openvr.pdb"),
+            )
+            .ok();
+        }
+    }
+
+    // ===== Build dashboard =====
+    {
+        let _push_guard = sh.push_dir(afs::crate_dir("dashboard"));
+        cmd!(sh, "cargo build {common_flags_ref...}")
+            .run()
+            .unwrap();
+
+        sh.copy_file(
+            artifacts_dir.join(afs::exec_fname("alvr_dashboard")),
+            build_layout.dashboard_exe(),
+        )
+        .ok();
+    }
+
+    // ===== Static resources (safe overwrite only) =====
+    {
+        sh.copy_file(
+            afs::crate_dir("xtask").join("resources/driver.vrdrivermanifest"),
+            build_layout.openvr_driver_manifest(),
+        )
+        .ok();
+    }
 }

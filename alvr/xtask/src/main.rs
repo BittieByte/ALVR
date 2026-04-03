@@ -13,7 +13,7 @@ use dependencies::OpenXRLoadersSelection;
 use packaging::ReleaseFlavor;
 use pico_args::Arguments;
 use std::{fs, process, time::Instant};
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 const HELP_STR: &str = r#"
 cargo xtask
@@ -255,6 +255,9 @@ fn main() {
                 "package-streamer" => {
                     packaging::package_streamer(platform, for_ci, !no_nvidia, gpl, root)
                 }
+				"build-streamer-incremental" => {
+					build::build_streamer_incremental(profile, gpl, root, false, profiling);
+				}
                 "package-launcher" => packaging::package_launcher(),
                 "package-client" => packaging::package_client_openxr(package_flavor, for_ci),
                 "package-client-lib" => packaging::package_client_lib(link_stdcpp, all_targets),
@@ -270,6 +273,9 @@ fn main() {
                     }
                 }
                 "check-msrv" => version::check_msrv(),
+                "check-licenses" => {
+                    packaging::generate_licenses();
+                }
                 "kill-oculus" => kill_oculus_processes(),
                 _ => print_help_and_exit("Unrecognized subcommand."),
             }
