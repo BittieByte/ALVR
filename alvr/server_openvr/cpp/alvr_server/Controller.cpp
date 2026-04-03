@@ -5,8 +5,33 @@
 #include "Utils.h"
 #include "include/openvr_math.h"
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string_view>
+
+// Helper function to check if a position looks like an invalid/sleep position
+static bool IsValidControllerPosition(const float position[3]) {
+    // Check for position at origin (0, 0, 0) which indicates an uninitialized/sleep state
+    const float ORIGIN_THRESHOLD = 0.001f;  // ~1mm tolerance
+    bool atOrigin = std::abs(position[0]) < ORIGIN_THRESHOLD &&
+                    std::abs(position[1]) < ORIGIN_THRESHOLD &&
+                    std::abs(position[2]) < ORIGIN_THRESHOLD;
+    
+    if (atOrigin) {
+        return false;  // Position at origin is invalid
+    }
+    
+    // Check for positions that are extremely far away (likely junk data)
+    // Most XR tracking is within ~10 meters range
+    const float MAX_DISTANCE_SQ = 100.0f * 100.0f;  // 100 meters squared
+    float distSq = position[0] * position[0] + position[1] * position[1] + position[2] * position[2];
+    
+    if (distSq > MAX_DISTANCE_SQ) {
+        return false;  // Position is too far away
+    }
+    
+    return true;
+}
 
 Controller::Controller(uint64_t deviceID, vr::EVRSkeletalTrackingLevel skeletonLevel)
     : TrackedDevice(
@@ -173,88 +198,126 @@ void Controller::SetButton(uint64_t id, FfiButtonValue value) {
 }
 
 bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, FfiHandData handData) {
+
+    // Nothing to do if SteamVR hasn't assigned us a device slot yet.
     if (this->object_id == vr::k_unTrackedDeviceIndexInvalid) {
         return false;
     }
 
     auto controllerMotion = handData.controllerMotion;
-    auto handSkeleton = handData.handSkeleton;
+    auto handSkeleton     = handData.handSkeleton;
 
+    // A hand-tracker device only processes hand-skeleton data; a controller
+    // device only processes controller-motion data.
     bool enabledAsHandTracker = handData.isHandTracker
         && (device_id == HAND_TRACKER_LEFT_ID || device_id == HAND_TRACKER_RIGHT_ID);
-    bool enabledAsController
-        = !handData.isHandTracker && (device_id == HAND_LEFT_ID || device_id == HAND_RIGHT_ID);
+    bool enabledAsController  = !handData.isHandTracker
+        && (device_id == HAND_LEFT_ID || device_id == HAND_RIGHT_ID);
+
+    // `enabled` is true only when we have at least one valid data source AND
+    // this device is the right type to consume it.
     bool enabled = (controllerMotion != nullptr || handSkeleton != nullptr)
         && (enabledAsHandTracker || enabledAsController);
 
-    Debug(
-        "%s %s: enabled: %d, ctrl: %d, hand: %d",
-        (device_id == HAND_TRACKER_LEFT_ID || device_id == HAND_TRACKER_RIGHT_ID) ? "hand tracker"
-                                                                                  : "controller",
-        (device_id == HAND_TRACKER_LEFT_ID || device_id == HAND_LEFT_ID) ? "left" : "right",
-        enabled,
-        handData.controllerMotion != nullptr,
-        handData.handSkeleton != nullptr
-    );
+    // ── NEW: Validate tracking source (controller OR hand root) ───────────
+    if (enabled) {
+        bool validTracking = true;
+
+        if (controllerMotion != nullptr) {
+            validTracking = IsValidControllerPosition(controllerMotion->position);
+        } else if (handSkeleton != nullptr) {
+            validTracking = IsValidControllerPosition(handSkeleton->jointPositions[0]);
+        }
+
+        // Detect device type switch
+        bool noInputForThisDevice = (controllerMotion == nullptr && !handData.isHandTracker)
+            || (handSkeleton == nullptr && handData.isHandTracker);
+
+        if (!validTracking || noInputForThisDevice) {
+            if (Settings::Instance().m_maintainPositionOnTrackingLoss && !noInputForThisDevice) {
+                // Only freeze on actual tracking loss
+                return false;
+            }
+
+            // Force device into disabled state so SteamVR updates it
+            enabled = false;
+        }
+    }
+
+    // When maintain-position is on and tracking is lost, do nothing and let
+    // SteamVR hold whatever pose it last received.
+    if (!enabled && Settings::Instance().m_maintainPositionOnTrackingLoss) {
+        return false;
+    }
 
     auto vr_driver_input = vr::VRDriverInput();
 
+    // ── Build the pose struct ─────────────────────────────────────────────
     auto pose = vr::DriverPose_t {};
-    pose.poseIsValid = enabled;
-    pose.deviceIsConnected = enabled;
-    pose.result = enabled ? vr::TrackingResult_Running_OK : vr::TrackingResult_Uninitialized;
 
-    pose.qDriverFromHeadRotation = HmdQuaternion_Init(1, 0, 0, 0);
+    pose.poseIsValid       = enabled;
+    pose.deviceIsConnected = enabled;
+    pose.result = enabled ? vr::TrackingResult_Running_OK
+                          : vr::TrackingResult_Uninitialized;
+
+    bool hasValidTrackingData = enabled;
+
+    pose.qDriverFromHeadRotation  = HmdQuaternion_Init(1, 0, 0, 0);
     pose.qWorldFromDriverRotation = HmdQuaternion_Init(1, 0, 0, 0);
 
+    // ── Populate position / velocity ──────────────────────────────────────
+
     if (controllerMotion != nullptr) {
+        // ── Path A: Physical controller ───────────────────────────────────
+        // Reject positions that look like hardware sleep/uninitialized state
+        // so they don't get frozen as our "last valid pose".
         auto m = controllerMotion;
+        if (!IsValidControllerPosition(m->position)) {
+            hasValidTrackingData = false;
+        } else {
+            pose.qRotation = HmdQuaternion_Init(
+                m->orientation.w, m->orientation.x,
+                m->orientation.y, m->orientation.z);
+            pose.vecPosition[0] = m->position[0];
+            pose.vecPosition[1] = m->position[1];
+            pose.vecPosition[2] = m->position[2];
+            pose.vecVelocity[0] = m->linearVelocity[0];
+            pose.vecVelocity[1] = m->linearVelocity[1];
+            pose.vecVelocity[2] = m->linearVelocity[2];
+            pose.vecAngularVelocity[0] = m->angularVelocity[0];
+            pose.vecAngularVelocity[1] = m->angularVelocity[1];
+            pose.vecAngularVelocity[2] = m->angularVelocity[2];
+        }
 
-        pose.qRotation = HmdQuaternion_Init(
-            m->orientation.w, m->orientation.x, m->orientation.y, m->orientation.z
-        );
-
-        pose.vecPosition[0] = m->position[0];
-        pose.vecPosition[1] = m->position[1];
-        pose.vecPosition[2] = m->position[2];
-
-        pose.vecVelocity[0] = m->linearVelocity[0];
-        pose.vecVelocity[1] = m->linearVelocity[1];
-        pose.vecVelocity[2] = m->linearVelocity[2];
-
-        pose.vecAngularVelocity[0] = m->angularVelocity[0];
-        pose.vecAngularVelocity[1] = m->angularVelocity[1];
-        pose.vecAngularVelocity[2] = m->angularVelocity[2];
     } else if (handSkeleton != nullptr) {
+        // ── Path B: Hand skeleton (optical hand tracking) ─────────────────
+        // Joint 0 is the wrist root — use it as the device's 6DOF pose.
         auto r = handSkeleton->jointRotations[0];
-        pose.qRotation = HmdQuaternion_Init(r.w, r.x, r.y, r.z);
-
         auto p = handSkeleton->jointPositions[0];
+        pose.qRotation      = HmdQuaternion_Init(r.w, r.x, r.y, r.z);
         pose.vecPosition[0] = p[0];
         pose.vecPosition[1] = p[1];
         pose.vecPosition[2] = p[2];
 
-        // If possible, use the last stored m_pose and timestamp
-        // to calculate the velocities of the current pose.
-        double linearVelocity[3] = { 0.0, 0.0, 0.0 };
+        // Estimate velocity by finite-differencing against the previous frame.
+        double linearVelocity[3]          = { 0.0, 0.0, 0.0 };
         vr::HmdVector3d_t angularVelocity = { 0.0, 0.0, 0.0 };
 
         if (handData.predictHandSkeleton && this->last_pose.poseIsValid) {
-            double dt = ((double)targetTimestampNs - (double)m_poseTargetTimestampNs) / NS_PER_S;
-
+            double dt = ((double)targetTimestampNs
+                       - (double)m_poseTargetTimestampNs) / NS_PER_S;
             if (dt > 0.0) {
                 linearVelocity[0] = (pose.vecPosition[0] - this->last_pose.vecPosition[0]) / dt;
                 linearVelocity[1] = (pose.vecPosition[1] - this->last_pose.vecPosition[1]) / dt;
                 linearVelocity[2] = (pose.vecPosition[2] - this->last_pose.vecPosition[2]) / dt;
-                angularVelocity
-                    = AngularVelocityBetweenQuats(this->last_pose.qRotation, pose.qRotation, dt);
+                angularVelocity   = AngularVelocityBetweenQuats(
+                    this->last_pose.qRotation, pose.qRotation, dt);
             }
         }
 
-        pose.vecVelocity[0] = linearVelocity[0];
-        pose.vecVelocity[1] = linearVelocity[1];
-        pose.vecVelocity[2] = linearVelocity[2];
-
+        pose.vecVelocity[0]        = linearVelocity[0];
+        pose.vecVelocity[1]        = linearVelocity[1];
+        pose.vecVelocity[2]        = linearVelocity[2];
         pose.vecAngularVelocity[0] = angularVelocity.v[0];
         pose.vecAngularVelocity[1] = angularVelocity.v[1];
         pose.vecAngularVelocity[2] = angularVelocity.v[2];
@@ -262,16 +325,24 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
 
     pose.poseTimeOffset = predictionS;
 
+    // ── Submit the pose ───────────────────────────────────────────────────
     this->submit_pose(pose);
 
     m_poseTargetTimestampNs = targetTimestampNs;
 
-    // Early return to skip updating the skeleton
+    // ── Skeleton / finger-curl update ─────────────────────────────────────
+
+    // No live tracking data this frame — nothing further to update.
     if (!enabled) {
         return false;
-    } else if (handSkeleton != nullptr) {
+    }
+
+    if (handSkeleton != nullptr) {
+        // ── Skeleton path: real hand tracking data ────────────────────────
+
         vr::VRBoneTransform_t boneTransform[SKELETON_BONE_COUNT] = {};
 
+        // Root bone sits at the wrist-space origin with identity rotation.
         boneTransform[0].orientation.w = 1.0;
         boneTransform[0].orientation.x = 0.0;
         boneTransform[0].orientation.y = 0.0;
@@ -281,7 +352,8 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
         boneTransform[0].position.v[2] = 0.0;
         boneTransform[0].position.v[3] = 1.0;
 
-        // NB: start from index 1 to skip the root bone
+        // Copy the remaining 30 joints from the hand skeleton data.
+        // Index 0 (root) is skipped — it's already set above.
         for (int j = 1; j < 31; j++) {
             boneTransform[j].orientation.w = handSkeleton->jointRotations[j].w;
             boneTransform[j].orientation.x = handSkeleton->jointRotations[j].x;
@@ -293,6 +365,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             boneTransform[j].position.v[3] = 1.0;
         }
 
+        // Push the same real-hand bone data for both motion-range variants.
         vr_driver_input->UpdateSkeletonComponent(
             m_compSkeleton,
             vr::VRSkeletalMotionRange_WithController,
@@ -306,36 +379,28 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             SKELETON_BONE_COUNT
         );
 
-        float rotThumb = (handSkeleton->jointRotations[2].z + handSkeleton->jointRotations[2].y
-                          + handSkeleton->jointRotations[3].z + handSkeleton->jointRotations[3].y
-                          + handSkeleton->jointRotations[4].z + handSkeleton->jointRotations[4].y)
-            * 0.67f;
-        float rotIndex = (handSkeleton->jointRotations[7].z + handSkeleton->jointRotations[8].z
-                          + handSkeleton->jointRotations[9].z)
-            * 0.67f;
+        // Derive per-finger curl scalars from joint rotation components.
+        float rotIndex  = (handSkeleton->jointRotations[7].z  + handSkeleton->jointRotations[8].z
+                         + handSkeleton->jointRotations[9].z)  * 0.67f;
         float rotMiddle = (handSkeleton->jointRotations[12].z + handSkeleton->jointRotations[13].z
-                           + handSkeleton->jointRotations[14].z)
-            * 0.67f;
-        float rotRing = (handSkeleton->jointRotations[17].z + handSkeleton->jointRotations[18].z
-                         + handSkeleton->jointRotations[19].z)
-            * 0.67f;
-        float rotPinky = (handSkeleton->jointRotations[22].z + handSkeleton->jointRotations[23].z
-                          + handSkeleton->jointRotations[24].z)
-            * 0.67f;
+                         + handSkeleton->jointRotations[14].z) * 0.67f;
+        float rotRing   = (handSkeleton->jointRotations[17].z + handSkeleton->jointRotations[18].z
+                         + handSkeleton->jointRotations[19].z) * 0.67f;
+        float rotPinky  = (handSkeleton->jointRotations[22].z + handSkeleton->jointRotations[23].z
+                         + handSkeleton->jointRotations[24].z) * 0.67f;
 
         vr_driver_input->UpdateScalarComponent(
-            m_buttonHandles[ALVR_INPUT_FINGER_INDEX], rotIndex, 0.0
-        );
+            m_buttonHandles[ALVR_INPUT_FINGER_INDEX],  rotIndex,  0.0);
         vr_driver_input->UpdateScalarComponent(
-            m_buttonHandles[ALVR_INPUT_FINGER_MIDDLE], rotMiddle, 0.0
-        );
+            m_buttonHandles[ALVR_INPUT_FINGER_MIDDLE], rotMiddle, 0.0);
         vr_driver_input->UpdateScalarComponent(
-            m_buttonHandles[ALVR_INPUT_FINGER_RING], rotRing, 0.0
-        );
+            m_buttonHandles[ALVR_INPUT_FINGER_RING],   rotRing,   0.0);
         vr_driver_input->UpdateScalarComponent(
-            m_buttonHandles[ALVR_INPUT_FINGER_PINKY], rotPinky, 0.0
-        );
+            m_buttonHandles[ALVR_INPUT_FINGER_PINKY],  rotPinky,  0.0);
+
     } else if (controllerMotion != nullptr) {
+        // ── Skeleton path: controller (no real finger data) ───────────────
+
         if (m_lastThumbTouch != m_currentThumbTouch) {
             m_thumbTouchAnimationProgress += 1.f / ANIMATION_FRAME_COUNT;
             if (m_thumbTouchAnimationProgress > 1.f) {
@@ -365,36 +430,26 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             indexCurl = 0.5 - m_indexTouchAnimationProgress * 0.5;
         }
         vr_driver_input->UpdateScalarComponent(
-            m_buttonHandles[ALVR_INPUT_FINGER_INDEX], indexCurl, 0.0
-        );
+            m_buttonHandles[ALVR_INPUT_FINGER_INDEX], indexCurl, 0.0);
 
         vr_driver_input->UpdateScalarComponent(
-            m_buttonHandles[ALVR_INPUT_FINGER_MIDDLE], m_gripValue, 0.0
-        );
+            m_buttonHandles[ALVR_INPUT_FINGER_MIDDLE], m_gripValue, 0.0);
 
-        // Ring and pinky fingers are not tracked. Infer a more natural pose.
         if (m_currentThumbTouch) {
-            vr_driver_input->UpdateScalarComponent(m_buttonHandles[ALVR_INPUT_FINGER_RING], 1, 0.0);
             vr_driver_input->UpdateScalarComponent(
-                m_buttonHandles[ALVR_INPUT_FINGER_PINKY], 1, 0.0
-            );
+                m_buttonHandles[ALVR_INPUT_FINGER_RING],  1, 0.0);
+            vr_driver_input->UpdateScalarComponent(
+                m_buttonHandles[ALVR_INPUT_FINGER_PINKY], 1, 0.0);
         } else {
             vr_driver_input->UpdateScalarComponent(
-                m_buttonHandles[ALVR_INPUT_FINGER_RING], m_gripValue, 0.0
-            );
+                m_buttonHandles[ALVR_INPUT_FINGER_RING],  m_gripValue, 0.0);
             vr_driver_input->UpdateScalarComponent(
-                m_buttonHandles[ALVR_INPUT_FINGER_PINKY], m_gripValue, 0.0
-            );
+                m_buttonHandles[ALVR_INPUT_FINGER_PINKY], m_gripValue, 0.0);
         }
 
         vr::VRBoneTransform_t boneTransforms[SKELETON_BONE_COUNT];
 
-        // Perform whatever logic is necessary to convert your device's input into a
-        // skeletal pose, first to create a pose "With Controller", that is as close to the
-        // pose of the user's real hand as possible
         GetBoneTransform(true, boneTransforms);
-
-        // Then update the WithController pose on the component with those transforms
         vr::EVRInputError err = vr_driver_input->UpdateSkeletonComponent(
             m_compSkeleton,
             vr::VRSkeletalMotionRange_WithController,
@@ -402,13 +457,10 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             SKELETON_BONE_COUNT
         );
         if (err != vr::VRInputError_None) {
-            // Handle failure case
-            Error("UpdateSkeletonComponentfailed.  Error: %i\n", err);
+            Error("UpdateSkeletonComponent failed. Error: %i\n", err);
         }
 
         GetBoneTransform(false, boneTransforms);
-
-        // Then update the WithoutController pose on the component
         err = vr_driver_input->UpdateSkeletonComponent(
             m_compSkeleton,
             vr::VRSkeletalMotionRange_WithoutController,
@@ -416,8 +468,7 @@ bool Controller::OnPoseUpdate(uint64_t targetTimestampNs, float predictionS, Ffi
             SKELETON_BONE_COUNT
         );
         if (err != vr::VRInputError_None) {
-            // Handle failure case
-            Error("UpdateSkeletonComponentfailed.  Error: %i\n", err);
+            Error("UpdateSkeletonComponent failed. Error: %i\n", err);
         }
     }
 
